@@ -1,4 +1,4 @@
-ifeq ($(TARGET_BOARD_PLATFORM),omap3)
+ifeq ($(TARGET_BOARD_PLATFORM),omap31)
 
 ifdef HARDWARE_OMX
 

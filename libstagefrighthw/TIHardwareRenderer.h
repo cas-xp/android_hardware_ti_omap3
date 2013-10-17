@@ -19,14 +19,24 @@
 #define TI_HARDWARE_RENDERER_H_
 
 #include <media/stagefright/VideoRenderer.h>
-#include "binder/MemoryHeapBase.h"
-#include "binder/MemoryBase.h"
 #include <utils/RefBase.h>
 #include <utils/Vector.h>
 
 #include <OMX_Component.h>
-#include <OMX_TI_IVCommon.h>
-#include "overlay_common.h"
+#include "v4l2_utils.h"
+
+#ifdef OVERLAY_SUPPORT_USERPTR_BUF
+
+enum wrd_state_e {
+    WRD_STATE_UNUSED,
+    WRD_STATE_UNQUEUED,
+    WRD_STATE_INDSSQUEUE
+};
+typedef struct OverlayBufferData_t {
+    const void *ptr;
+    enum wrd_state_e state;
+} OverlayBufferData;
+#endif
 
 namespace android {
 
@@ -35,26 +45,22 @@ class Overlay;
 
 class TIHardwareRenderer : public VideoRenderer {
 public:
-//S3D
     TIHardwareRenderer(
             const sp<ISurface> &surface,
             size_t displayWidth, size_t displayHeight,
             size_t decodedWidth, size_t decodedHeight,
-            OMX_COLOR_FORMATTYPE colorFormat,
-            int32_t rotationDegrees = 0,
-            int isS3D = 0, int numOfOpBuffers = -1);
+            OMX_COLOR_FORMATTYPE colorFormat);
 
     virtual ~TIHardwareRenderer();
-    void set_s3d_frame_layout(uint32_t s3d_mode, uint32_t s3d_fmt, uint32_t s3d_order, uint32_t s3d_subsampling);
+
     status_t initCheck() const { return mInitCheck; }
 
     virtual void render(
             const void *data, size_t size, void *platformPrivate);
 
-    Vector< sp<IMemory> > getBuffers() { return mOverlayAddresses; }
+#ifdef OVERLAY_SUPPORT_USERPTR_BUF
     bool setCallback(release_rendered_buffer_callback cb, void *c);
-    virtual void resizeRenderer(void* resize_params);
-    virtual void requestRendererClone(bool enable);
+#endif
 
 private:
     sp<ISurface> mISurface;
@@ -64,19 +70,17 @@ private:
     status_t mInitCheck;
     size_t mFrameSize;
     sp<Overlay> mOverlay;
-    Vector< sp<IMemory> > mOverlayAddresses;
-    int nOverlayBuffersQueued;
-    size_t mIndex;
-    sp<MemoryHeapBase> mVideoHeaps[NUM_OVERLAY_BUFFERS_MAX];
-    int buffers_queued_to_dss[NUM_OVERLAY_BUFFERS_MAX];
+    Vector<void *> mOverlayAddresses;
+#ifdef OVERLAY_SUPPORT_USERPTR_BUF
+    OverlayBufferData buffers_queued_to_dss[NUM_OVERLAY_BUFFERS_REQUESTED];
     release_rendered_buffer_callback release_frame_cb;
     void  *cookie;
+#endif
+    int nOverlayBuffersQueued;
+    size_t mIndex;
 
     TIHardwareRenderer(const TIHardwareRenderer &);
     TIHardwareRenderer &operator=(const TIHardwareRenderer &);
-
-    int mCropX;
-    int mCropY;
 };
 
 }  // namespace android

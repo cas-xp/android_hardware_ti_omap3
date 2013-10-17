@@ -17,34 +17,26 @@ LOCAL_PATH:= $(call my-dir)
 # hw/<COPYPIX_HARDWARE_MODULE_ID>.<ro.product.board>.so
 
 include $(CLEAR_VARS)
+ifeq ($(TARGET_PRODUCT), omap3evm)
+LOCAL_CFLAGS += -DCONFIG_OMAP3530
+endif
+ifeq ($(TARGET_PRODUCT), flashboard)
+LOCAL_CFLAGS += -DCONFIG_OMAP3530
+endif
+ifeq ($(TARGET_PRODUCT), beagleboard)
+LOCAL_CFLAGS += -DCONFIG_OMAP3530
+endif
 LOCAL_PRELINK_MODULE := false
 LOCAL_MODULE_PATH := $(TARGET_OUT_SHARED_LIBRARIES)/hw
 LOCAL_SHARED_LIBRARIES := liblog libcutils
-LOCAL_SRC_FILES := v4l2_utils.c TIOverlay.cpp
 
-ifeq ($(TARGET_BOARD_PLATFORM),omap4)
-LOCAL_CFLAGS := -DTARGET_OMAP4
+ifdef OMAP_ENHANCEMENT
+LOCAL_SRC_FILES := overlay_ex.cpp
+else
+LOCAL_SRC_FILES := overlay.cpp
 endif
-LOCAL_MODULE := overlay.$(TARGET_BOARD_PLATFORM)
-LOCAL_MODULE_TAGS:= optional
+LOCAL_SRC_FILES += v4l2_utils.c
 
+LOCAL_MODULE_TAGS := eng
+LOCAL_MODULE := overlay.omap3
 include $(BUILD_SHARED_LIBRARY)
-
-ifeq (0,1)
-include $(CLEAR_VARS)
-LOCAL_CFLAGS := -mabi=aapcs-linux 
-LOCAL_SHARED_LIBRARIES := liblog libcutils
-LOCAL_SRC_FILES := v4l2_utils.c v4l2_test.c
-LOCAL_MODULE := v4l2_test
-include $(BUILD_EXECUTABLE)
-endif
-
-include $(CLEAR_VARS)
-ifeq ($(TARGET_BOARD_PLATFORM),omap4)
-LOCAL_CFLAGS := -DTARGET_OMAP4
-endif
-LOCAL_SHARED_LIBRARIES := liblog libbinder libcutils libhardware libutils libui libsurfaceflinger_client
-LOCAL_SRC_FILES := TIOverlay_test.cpp
-LOCAL_MODULE := overlay_test
-LOCAL_MODULE_TAGS:= optional
-include $(BUILD_EXECUTABLE)

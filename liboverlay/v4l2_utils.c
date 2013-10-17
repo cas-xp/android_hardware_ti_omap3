@@ -1,25 +1,21 @@
 /*
- * Copyright (C) Texas Instruments - http://www.ti.com/
+ * Copyright (C) 2008 The Android Open Source Project
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 //#define OVERLAY_DEBUG 1
-#define LOG_TAG "Overlay-V4L2"
+#define LOG_TAG "Overlay"
 
 #include <fcntl.h>
 #include <errno.h>
@@ -28,10 +24,12 @@
 #include <linux/videodev.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <stdlib.h>
 #include "v4l2_utils.h"
-#include <cutils/properties.h>
-#include <sys/poll.h>
+
+#ifndef KERNEL_VERSION
+#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))
+#endif
+#define MAX_STR_LEN 35
 
 #define LOG_FUNCTION_NAME    LOGV("%s: %s",  __FILE__, __FUNCTION__);
 
@@ -46,8 +44,16 @@
         do { LOGE(fmt, ##args); } \
         while (0)
 #endif
+#define V4L2_CID_PRIV_OFFSET			0x00530000
+#define V4L2_CID_PRIV_ROTATION		(V4L2_CID_PRIVATE_BASE \
+						+ V4L2_CID_PRIV_OFFSET + 0)
+#define V4L2_CID_PRIV_COLORKEY		(V4L2_CID_PRIVATE_BASE \
+						+ V4L2_CID_PRIV_OFFSET + 1)
+#define V4L2_CID_PRIV_COLORKEY_EN	(V4L2_CID_PRIVATE_BASE \
+						+ V4L2_CID_PRIV_OFFSET + 2)
 
-static int mRotateOverlay = 0;
+
+
 int v4l2_overlay_get(int name) {
     int result = -1;
     switch (name) {
@@ -79,58 +85,93 @@ int v4l2_overlay_get(int name) {
     return result;
 }
 
+/* return kernel version code by parsing /proc/version,
+   return <= 0 if error happens */
+int get_kernel_version()
+{
+	char *verstring, *dummy;
+	int fd;
+	int major,minor,rev,ver=-1;
+	if ((verstring = (char *) malloc(MAX_STR_LEN)) == NULL )
+	{
+		LOGE("Failed to allocate memory\n");
+		return -1;
+	}
+	if ((dummy = (char *) malloc(MAX_STR_LEN)) == NULL )
+	{
+		LOGE("Failed to allocate memory\n");
+		free (verstring);
+		return -1;
+	}
+
+	if ((fd = open("/proc/version", O_RDONLY)) < 0)
+	{
+		LOGE("Failed to open file /proc/version\n");
+		goto ret;
+	}
+	if (read(fd, verstring, MAX_STR_LEN) < 0)
+	{
+		LOGE("Failed to read kernel version string from /proc/version file\n");
+		close(fd);
+		goto ret;
+	}
+	close(fd);
+	if (sscanf(verstring, "%s %s %d.%d.%d%s\n", dummy, dummy, &major, &minor, &rev, dummy) != 6)
+	{
+			LOGE("Failed to read kernel version numbers\n");
+	        goto ret;
+	}
+	ver = KERNEL_VERSION(major, minor, rev);
+
+ret:
+	free(verstring);
+	free(dummy);
+
+	return ver;
+}
+
 int v4l2_overlay_open(int id)
 {
     LOG_FUNCTION_NAME
-    char v4l2_dev_name[PATH_MAX];
-    sprintf(v4l2_dev_name, "/dev/video%d", id + 1);
-    LOGI ("Openning %s\n", v4l2_dev_name);
-    return open(v4l2_dev_name, O_RDWR);
+
+	int ver = get_kernel_version();
+	if(ver <= 0)
+	{
+		LOGE("Failed to parse kernel version\n");
+		return -1;
+	}
+
+	if (id == V4L2_OVERLAY_PLANE_VIDEO1)
+	{
+		if(ver >= KERNEL_VERSION(2,6,37))
+#if defined(CONFIG_OMAP3530)
+			return open("/dev/video7", O_RDWR); //device node is changed in kernel 2.6.37 from video1 to video7 for beagleboard and am37x
+#else
+			return open("/dev/video1", O_RDWR);
+#endif
+		else
+			return open("/dev/video1",O_RDWR);
+	}
+	else if (id == V4L2_OVERLAY_PLANE_VIDEO2)
+	{
+		return open("/dev/video2", O_RDWR);
+	}
+	return -EINVAL;
 }
 
-#ifdef OVERLAY_DEBUG
 void dump_pixfmt(struct v4l2_pix_format *pix)
 {
-    LOGI("w: %d\n", pix->width);
-    LOGI("h: %d\n", pix->height);
-    LOGI("color: %x\n", pix->colorspace);
+    char *fmt;
+
     switch (pix->pixelformat) {
-        case V4L2_PIX_FMT_YUYV:
-            LOGI ("YUYV\n");
-            break;
-        case V4L2_PIX_FMT_UYVY:
-            LOGI ("UYVY\n");
-            break;
-        case V4L2_PIX_FMT_RGB565:
-            LOGI ("RGB565\n");
-            break;
-        case V4L2_PIX_FMT_RGB565X:
-            LOGI ("RGB565X\n");
-            break;
-        case V4L2_PIX_FMT_NV12:
-            LOGI ("NV12\n");
-            break;
-        case V4L2_PIX_FMT_RGB32:
-            LOGI ("RGB32\n");
-        default:
-            LOGI("not supported\n");
+        case V4L2_PIX_FMT_YUYV: fmt = "YUYV"; break;
+        case V4L2_PIX_FMT_UYVY: fmt = "UYVY"; break;
+        case V4L2_PIX_FMT_RGB565: fmt = "RGB565"; break;
+        case V4L2_PIX_FMT_RGB565X: fmt = "RGB565X"; break;
+        default: fmt = "unsupported"; break;
     }
-}
-
-void dump_crop(struct v4l2_crop *crop)
-{
-    LOGI("crop l: %d ", crop->c.left);
-    LOGI("crop t: %d ", crop->c.top);
-    LOGI("crop w: %d ", crop->c.width);
-    LOGI("crop h: %d\n", crop->c.height);
-}
-
-void dump_window(struct v4l2_window *win)
-{
-    LOGI("window l: %d ", win->w.left);
-    LOGI("window t: %d ", win->w.top);
-    LOGI("window w: %d ", win->w.width);
-    LOGI("window h: %d\n", win->w.height);
+    LOGI("output pixfmt: w %d, h %d, colorsapce %x, pixfmt %s",
+            pix->width, pix->height, pix->colorspace, fmt);
 }
 
 void v4l2_overlay_dump_state(int fd)
@@ -144,39 +185,30 @@ void v4l2_overlay_dump_state(int fd)
     ret = ioctl(fd, VIDIOC_G_FMT, &format);
     if (ret < 0)
         return;
-    LOGI("output pixfmt:\n");
     dump_pixfmt(&format.fmt.pix);
 
     format.type = V4L2_BUF_TYPE_VIDEO_OVERLAY;
     ret = ioctl(fd, VIDIOC_G_FMT, &format);
     if (ret < 0)
         return;
-    LOGI("v4l2_overlay window:\n");
-    dump_window(&format.fmt.win);
+    LOGI("v4l2_overlay window: l %d, t %d, w %d, h %d",
+         format.fmt.win.w.left, format.fmt.win.w.top,
+         format.fmt.win.w.width, format.fmt.win.w.height);
 
     crop.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
     ret = ioctl(fd, VIDIOC_G_CROP, &crop);
     if (ret < 0)
         return;
-    LOGI("output crop:\n");
-    dump_crop(&crop);
-/*
-    crop.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-    ret = ioctl(fd, VIDIOC_G_CROP, &crop);
-    if (ret < 0)
-        return;
-    LOGI("ovelay crop:\n");
-    dump_crop(&crop);
-*/
+    LOGI("output crop: l %d, t %d, w %d, h %d",
+         crop.c.left, crop.c.top, crop.c.width, crop.c.height);
 }
-#else
-#define v4l2_overlay_dump_state(x)
-#endif
 
 static void error(int fd, const char *msg)
 {
-  LOGE("Error = %s from %s. errno = %d", strerror(errno), msg, errno);
+  LOGE("Error = %s from %s", strerror(errno), msg);
+#ifdef OVERLAY_DEBUG
   v4l2_overlay_dump_state(fd);
+#endif
 }
 
 static int v4l2_overlay_ioctl(int fd, int req, void *arg, const char* msg)
@@ -197,44 +229,19 @@ int configure_pixfmt(struct v4l2_pix_format *pix, int32_t fmt,
 
     int fd;
 
-   pix->field = V4L2_FIELD_NONE;
-
-   switch (fmt) {
-    case OVERLAY_FORMAT_RGBA_8888:
-        pix->pixelformat = V4L2_PIX_FMT_RGB32;
-        break;
-    case OVERLAY_FORMAT_RGB_565:
-        pix->pixelformat = V4L2_PIX_FMT_RGB565;
-        break;
-    case OVERLAY_FORMAT_YCbYCr_422_I:
-        pix->pixelformat = V4L2_PIX_FMT_YUYV;
-        break;
-    case OVERLAY_FORMAT_CbYCrY_422_I:
-        pix->pixelformat = V4L2_PIX_FMT_UYVY;
-        break;
-    case OVERLAY_FORMAT_YCbCr_420_SP_SEQ_TB:
-        /* NV12 Interlaced (Sequential Top-Bottom).
-           Just update pix.field, and  NV12 params */
-        pix->field = V4L2_FIELD_SEQ_TB;
-        pix->pixelformat = V4L2_PIX_FMT_NV12;
-        pix->bytesperline = 4096;
-        break;
-    case OVERLAY_FORMAT_YCbCr_420_SP:
-        pix->pixelformat = V4L2_PIX_FMT_NV12;
-        pix->bytesperline = 4096;
-        break;
-    //NOTE: we have to add SW color conversion algo
-    //      inorder to support these below formats
-    case OVERLAY_FORMAT_YCbCr_422_SP:
-    case OVERLAY_FORMAT_YCbYCr_420_I:
-    case OVERLAY_FORMAT_CbYCrY_420_I:
-    case OVERLAY_FORMAT_BGRA_8888:
-    return -1;
-
+    switch (fmt) {
+        case OVERLAY_FORMAT_RGB_565:
+            pix->pixelformat = V4L2_PIX_FMT_RGB565;
+            break;
+        case OVERLAY_FORMAT_YCbYCr_422_I:
+            pix->pixelformat = V4L2_PIX_FMT_YUYV;
+            break;
+        case OVERLAY_FORMAT_CbYCrY_422_I:
+            pix->pixelformat = V4L2_PIX_FMT_UYVY;
+            break;
         default:
             return -1;
     }
-
     pix->width = w;
     pix->height = h;
     return 0;
@@ -269,28 +276,33 @@ int v4l2_overlay_init(int fd, uint32_t w, uint32_t h, uint32_t fmt)
     struct v4l2_format format;
     int ret;
 
+    /* configure the v4l2_overlay framebuffer */
+    /*
+    ret = v4l2_overlay_ioctl(fd, VIDIOC_G_FBUF, &fbuf, "get fbuf");
+    if (ret)
+        return ret;
+    if (fbuf.fmt.pixelformat != dst_format) {
+        fbuf.fmt.pixelformat = dst_format;
+        ret = v4l2_overlay_ioctl(fd, VIDIOC_S_FBUF, &fbuf, "set fbuf");
+        if (ret)
+            return ret;
+    }
+    */
+
     format.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
     ret = v4l2_overlay_ioctl(fd, VIDIOC_G_FMT, &format, "get format");
     if (ret)
         return ret;
-    LOGV("v4l2_overlay_init:: w=%d h=%d", format.fmt.pix.width, format.fmt.pix.height);
+    LOGI("v4l2_overlay_init:: w=%d h=%d\n", format.fmt.pix.width, format.fmt.pix.height);
 
     format.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-    ret = configure_pixfmt(&format.fmt.pix, fmt, w, h);
-    if (ret)
-        return ret;
-    LOGV("v4l2_overlay_init set:: w=%d h=%d fmt=%d", format.fmt.pix.width, format.fmt.pix.height, format.fmt.pix.pixelformat);
+    configure_pixfmt(&format.fmt.pix, fmt, w, h);
+    LOGI("v4l2_overlay_init:: w=%d h=%d\n", format.fmt.pix.width, format.fmt.pix.height);
     ret = v4l2_overlay_ioctl(fd, VIDIOC_S_FMT, &format, "set output format");
 
     format.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
     ret = v4l2_overlay_ioctl(fd, VIDIOC_G_FMT, &format, "get output format");
-    LOGV("v4l2_overlay_init get:: w=%d h=%d fmt=%d", format.fmt.pix.width, format.fmt.pix.height, format.fmt.pix.pixelformat);
-
-    char value[PROPERTY_VALUE_MAX];
-    property_get("debug.video.rotateoverlay", value, "0");
-    mRotateOverlay = atoi(value);
-    LOGD_IF(mRotateOverlay, "overlay rotation enabled");
-
+    LOGI("v4l2_overlay_init:: w=%d h=%d\n", format.fmt.pix.width, format.fmt.pix.height);
     return ret;
 }
 
@@ -305,12 +317,12 @@ int v4l2_overlay_get_input_size_and_format(int fd, uint32_t *w, uint32_t *h, uin
     ret = v4l2_overlay_ioctl(fd, VIDIOC_G_FMT, &format, "get format");
     *w = format.fmt.pix.width;
     *h = format.fmt.pix.height;
-    if (format.fmt.pix.pixelformat == V4L2_PIX_FMT_UYVY)
-        *fmt = OVERLAY_FORMAT_YCbYCr_422_I;
+    //if (format.fmt.pix.pixelformat == V4L2_PIX_FMT_UYVY)
+    if (format.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV)
+        *fmt = OVERLAY_FORMAT_CbYCrY_422_I;
     else return -EINVAL;
     return ret;
 }
-
 
 int v4l2_overlay_set_position(int fd, int32_t x, int32_t y, int32_t w, int32_t h)
 {
@@ -326,21 +338,15 @@ int v4l2_overlay_set_position(int fd, int32_t x, int32_t y, int32_t w, int32_t h
                              "get v4l2_overlay format");
     if (ret)
        return ret;
-    LOGV("v4l2_overlay_set_position:: w=%d h=%d", format.fmt.win.w.width, format.fmt.win.w.height);
-
-    if (mRotateOverlay) {
-        w = 480;
-        h = 800;
-        x = 0;
-        y = 0;
-    }
+    LOGI("v4l2_overlay_set_position:: original w=%d h=%d", format.fmt.win.w.width, format.fmt.win.w.height);
+   
     configure_window(&format.fmt.win, w, h, x, y);
 
     format.type = V4L2_BUF_TYPE_VIDEO_OVERLAY;
     ret = v4l2_overlay_ioctl(fd, VIDIOC_S_FMT, &format,
                              "set v4l2_overlay format");
-    LOGV("v4l2_overlay_set_position:: w=%d h=%d", format.fmt.win.w.width, format.fmt.win.w.height);
-
+    LOGI("v4l2_overlay_set_position:: new w=%d h=%d", format.fmt.win.w.width, format.fmt.win.w.height);
+    
     if (ret)
        return ret;
     v4l2_overlay_dump_state(fd);
@@ -395,62 +401,21 @@ int v4l2_overlay_get_crop(int fd, uint32_t *x, uint32_t *y, uint32_t *w, uint32_
     return ret;
 }
 
-
-int v4l2_overlay_set_rotation(int fd, int degree, int step, uint32_t mirror)
+int v4l2_overlay_set_rotation(int fd, int degree, int step)
 {
     LOG_FUNCTION_NAME
 
     int ret;
     struct v4l2_control ctrl;
-    memset(&ctrl, 0, sizeof(ctrl));
-    ctrl.id = V4L2_CID_VFLIP;
-    ctrl.value = mirror;
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_S_CTRL, &ctrl, "set FLIP");
 
-    memset(&ctrl, 0, sizeof(ctrl));
     ctrl.id = V4L2_CID_ROTATE;
     ctrl.value = degree;
-    if (mRotateOverlay) {
-        ctrl.value = 90;
-    }
     ret = v4l2_overlay_ioctl(fd, VIDIOC_S_CTRL, &ctrl, "set rotation");
 
     return ret;
 }
 
-int v4l2_overlay_get_rotation(int fd, int* degree, int step, uint32_t* mirror)
-{
-    LOG_FUNCTION_NAME
-    int ret;
-    struct v4l2_control control;
-    memset(&control, 0, sizeof(control));
-    control.id = V4L2_CID_ROTATE;
-    ret = ioctl (fd, VIDIOC_G_CTRL, &control);
-    if (ret < 0) {
-        error (fd, "VIDIOC_G_CTRL id: V4L2_CID_ROTATE ioctl");
-        return ret;
-    }
-
-    if (mRotateOverlay) {
-        control.value = 90;
-    }
-    *degree = control.value;
-
-    memset(&control, 0, sizeof(control));
-    control.id = V4L2_CID_VFLIP;
-    ret = ioctl (fd, VIDIOC_G_CTRL, &control);
-    if (ret < 0) {
-        error (fd, "VIDIOC_G_CTRL id: V4L2_CID_VFLIP ioctl");
-        return ret;
-    }
-
-    *mirror = control.value;
-
-    return ret;
-}
-
-
-int v4l2_overlay_set_colorkey(int fd, int enable, int colorkey, int keyType)
+int v4l2_overlay_set_colorkey(int fd, int enable, int colorkey)
 {
     LOG_FUNCTION_NAME
 
@@ -463,28 +428,11 @@ int v4l2_overlay_set_colorkey(int fd, int enable, int colorkey, int keyType)
 
     if (ret)
         return ret;
-#ifdef TARGET_OMAP4
-    if (enable)
-    {
-        if (keyType == EVIDEO_SOURCE) {
-            fbuf.flags &= ~V4L2_FBUF_FLAG_CHROMAKEY;
-            fbuf.flags |= V4L2_FBUF_FLAG_SRC_CHROMAKEY;
-        } else {
-            fbuf.flags |= V4L2_FBUF_FLAG_CHROMAKEY;
-            fbuf.flags &= ~V4L2_FBUF_FLAG_SRC_CHROMAKEY;
-        }
-    }
-    else
-    {
-        fbuf.flags &= ~V4L2_FBUF_FLAG_CHROMAKEY;
-        fbuf.flags &= ~V4L2_FBUF_FLAG_SRC_CHROMAKEY;
-    }
-#else
+
     if (enable)
         fbuf.flags |= V4L2_FBUF_FLAG_CHROMAKEY;
     else
         fbuf.flags &= ~V4L2_FBUF_FLAG_CHROMAKEY;
-#endif
 
     ret = v4l2_overlay_ioctl(fd, VIDIOC_S_FBUF, &fbuf, "enable colorkey");
 
@@ -506,37 +454,6 @@ int v4l2_overlay_set_colorkey(int fd, int enable, int colorkey, int keyType)
         ret = v4l2_overlay_ioctl(fd, VIDIOC_S_FMT, &fmt, "set colorkey");
     }
 
-    return ret;
-}
-
-int v4l2_overlay_set_zorder(int fd, int value)
-{
-    LOG_FUNCTION_NAME
-    int ret;
-    struct v4l2_format fmt;
-    memset(&fmt, 0, sizeof(fmt));
-    fmt.type = V4L2_BUF_TYPE_VIDEO_OVERLAY;
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_G_FMT, &fmt, "get zorder");
-    if (ret)
-        return ret;
-
-    fmt.fmt.win.zorder = value & 0x3;
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_S_FMT, &fmt, "set zorder");
-    return ret;
-}
-
-int v4l2_overlay_get_zorder(int fd, int* value)
-{
-    LOG_FUNCTION_NAME
-    int ret;
-    struct v4l2_format fmt;
-    memset(&fmt, 0, sizeof(fmt));
-    fmt.type = V4L2_BUF_TYPE_VIDEO_OVERLAY;
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_G_FMT, &fmt, "get zorder");
-    if (ret)
-        return ret;
-
-    *value = fmt.fmt.win.zorder;
     return ret;
 }
 
@@ -597,58 +514,47 @@ int v4l2_overlay_set_local_alpha(int fd, int enable)
     else
         fbuf.flags &= ~V4L2_FBUF_FLAG_LOCAL_ALPHA;
 
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_S_FBUF, &fbuf, "enable global alpha");
+    ret = v4l2_overlay_ioctl(fd, VIDIOC_S_FBUF, &fbuf, "enable local alpha");
 
     return ret;
 }
 
-int v4l2_overlay_req_buf(int fd, uint32_t *num_bufs, int cacheable_buffers, int maintain_coherency, int memtype)
+#ifdef OVERLAY_SUPPORT_USERPTR_BUF
+int v4l2_overlay_req_buf(int fd, uint32_t *num_bufs, int cacheable_buffers, int memtype)
+#else
+int v4l2_overlay_req_buf(int fd, uint32_t *num_bufs, int cacheable_buffers)
+#endif
 {
     LOG_FUNCTION_NAME
 
     struct v4l2_requestbuffers reqbuf;
     int ret, i;
     reqbuf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+#ifdef OVERLAY_SUPPORT_USERPTR_BUF
+    reqbuf.memory = (memtype == EMEMORY_USERPTR) ? V4L2_MEMORY_USERPTR : V4L2_MEMORY_MMAP;
+#else
     reqbuf.memory = V4L2_MEMORY_MMAP;
-    if (memtype == EMEMORY_USRPTR)
-    {
-        reqbuf.memory = V4L2_MEMORY_USERPTR;
-    }
+#endif
     reqbuf.count = *num_bufs;
-    reqbuf.reserved[0] = cacheable_buffers | (maintain_coherency << 1); /* Bit 0 = cacheable_buffers, Bit 1 = maintain_coherency */
-    LOGV("reqbuf.reserved[0] = %x", reqbuf.reserved[0]);
+    //reqbuf.reserved[0] = cacheable_buffers;
     ret = ioctl(fd, VIDIOC_REQBUFS, &reqbuf);
     if (ret < 0) {
         error(fd, "reqbuf ioctl");
         return ret;
     }
-    LOGV("%d buffers allocated %d requested", reqbuf.count, 4);
+    LOGI("%d buffers allocated %d requested\n", reqbuf.count, *num_bufs);
     if (reqbuf.count > *num_bufs) {
-        error(fd, "Not enough buffer structs passed to get_buffers");
+        error(fd, "Not enough buffer allcated");
         return -ENOMEM;
     }
     *num_bufs = reqbuf.count;
-    LOGV("buffer cookie is %d", reqbuf.type);
+    LOGI("buffer cookie is %d\n", reqbuf.type);
     return 0;
 }
 
 static int is_mmaped(struct v4l2_buffer *buf)
 {
     return buf->flags == V4L2_BUF_FLAG_MAPPED;
-}
-
-static int is_queued(struct v4l2_buffer *buf)
-{
-    /* is either on the input or output queue in the kernel */
-    return (buf->flags & V4L2_BUF_FLAG_QUEUED) ||
-           (buf->flags & V4L2_BUF_FLAG_DONE);
-}
-
-static int is_dequeued(struct v4l2_buffer *buf)
-{
-    /* is on neither input or output queue in kernel */
-    return (!(buf->flags & V4L2_BUF_FLAG_QUEUED) &&
-            !(buf->flags & V4L2_BUF_FLAG_DONE));
 }
 
 int v4l2_overlay_query_buffer(int fd, int index, struct v4l2_buffer *buf)
@@ -660,7 +566,7 @@ int v4l2_overlay_query_buffer(int fd, int index, struct v4l2_buffer *buf)
     buf->type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
     buf->memory = V4L2_MEMORY_MMAP;
     buf->index = index;
-    LOGV("query buffer, mem=%u type=%u index=%u\n", buf->memory, buf->type,
+    LOGI("query buffer, mem=%u type=%u index=%u\n", buf->memory, buf->type,
          buf->index);
     return v4l2_overlay_ioctl(fd, VIDIOC_QUERYBUF, buf, "querybuf ioctl");
 }
@@ -683,12 +589,11 @@ int v4l2_overlay_map_buf(int fd, int index, void **start, size_t *len)
 
     *len = buf.length;
     *start = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED,
-                  fd, buf.m.offset & ~(PAGE_SIZE - 1));
+                  fd, buf.m.offset);
     if (*start == MAP_FAILED) {
         LOGE("map failed, length=%u offset=%u\n", buf.length, buf.m.offset);
         return -EINVAL;
     }
-    *((__u32 **) start) += buf.m.offset & (PAGE_SIZE - 1);
     return 0;
 }
 
@@ -696,7 +601,7 @@ int v4l2_overlay_unmap_buf(void *start, size_t len)
 {
     LOG_FUNCTION_NAME
 
-    return munmap((void *) (~(PAGE_SIZE - 1) & (__u32) start), len);
+  return munmap(start, len);
 }
 
 
@@ -721,317 +626,69 @@ int v4l2_overlay_stream_off(int fd)
     return v4l2_overlay_ioctl(fd, VIDIOC_STREAMOFF, &type, "stream off");
 }
 
-int v4l2_overlay_q_buf(int fd, int index, int memtype, void* buffer, size_t length)
+#ifdef OVERLAY_SUPPORT_USERPTR_BUF
+int v4l2_overlay_q_buf_uptr(int fd, void *ptr, size_t len)
 {
-    //LOG_FUNCTION_NAME
+    /* FIXME index - not idea to track qbuf index */
+    static int index = 0;
     struct v4l2_buffer buf;
     int ret;
 
-    /*
-    ret = v4l2_overlay_query_buffer(fd, buffer_cookie, index, &buf);
-    if (ret)
-        return ret;
-    if (is_queued(buf)) {
-        LOGE("Trying to queue buffer to kernel that is already queued!\n");
-        return -EINVAL
-    }
-    */
+    buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+    buf.m.userptr = (unsigned long)ptr;
+    buf.index = index++;
+    buf.length = len;
+    buf.memory = V4L2_MEMORY_USERPTR;
+    buf.field = V4L2_FIELD_NONE;
+    buf.timestamp.tv_sec = 0;
+    buf.timestamp.tv_usec = 0;
+    buf.flags = 0;
+    index %= NUM_OVERLAY_BUFFERS_REQUESTED;
+
+    return v4l2_overlay_ioctl(fd, VIDIOC_QBUF, &buf, "qbuf");
+}
+#endif
+
+int v4l2_overlay_q_buf(int fd, int index)
+{
+    struct v4l2_buffer buf;
+    int ret;
+
     buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
     buf.index = index;
     buf.memory = V4L2_MEMORY_MMAP;
-    if (memtype == EMEMORY_USRPTR)
-    {
-        buf.memory = V4L2_MEMORY_USERPTR;
-        buf.m.userptr = (unsigned long)buffer;
-        buf.length = length;
-    }
+    buf.field = V4L2_FIELD_NONE;
+    buf.timestamp.tv_sec = 0;
+    buf.timestamp.tv_usec = 0;
     buf.flags = 0;
 
     return v4l2_overlay_ioctl(fd, VIDIOC_QBUF, &buf, "qbuf");
 }
 
-int v4l2_overlay_dq_buf(int fd, int *index, int memtype, void* buffer, size_t length)
+#ifdef OVERLAY_SUPPORT_USERPTR_BUF
+int v4l2_overlay_dq_buf(int fd, int *index, int memtype)
+#else
+int v4l2_overlay_dq_buf(int fd, int *index)
+#endif
 {
     struct v4l2_buffer buf;
     int ret;
-    struct pollfd p;
-
-    /*
-    ret = v4l2_overlay_query_buffer(fd, buffer_cookie, index, &buf);
-    if (ret)
-        return ret;
-
-    if (is_dequeued(buf)) {
-        LOGE("Trying to dequeue buffer that is not in kernel!\n");
-        return -EINVAL
-    }
-    */
-    /* check if buffer is available */
-
-    /* use poll() to timeout gracefully */
-    p.fd     = fd;
-    p.events = POLLOUT;
-
-    /* for now use 1/15s for timeout */
-    ret = poll(&p, 1, 67);
-    if (ret <= 0)
-        return ret ? -errno : -EIO;
 
     buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+#ifdef OVERLAY_SUPPORT_USERPTR_BUF
+    buf.memory = (memtype == EMEMORY_USERPTR) ?
+                 V4L2_MEMORY_USERPTR : V4L2_MEMORY_MMAP;
+#else
     buf.memory = V4L2_MEMORY_MMAP;
-    if (memtype == EMEMORY_USRPTR)
-    {
-        buf.memory = V4L2_MEMORY_USERPTR;
-        buf.m.userptr = (unsigned long)buffer;
-        buf.length = length;
-    }
+#endif
+
     ret = v4l2_overlay_ioctl(fd, VIDIOC_DQBUF, &buf, "dqbuf");
     if (ret)
-      return errno;
+        return errno;
+#ifdef OVERLAY_SUPPORT_USERPTR_BUF
+    *index = (memtype == EMEMORY_USERPTR) ? (int)buf.m.userptr : buf.index;
+#else
     *index = buf.index;
+#endif
     return 0;
 }
-
-int v4l2_overlay_getId(int fd, int* id)
-{
-    LOG_FUNCTION_NAME
-    int ret;
-    struct v4l2_control ctrl;
-    memset(&ctrl, 0, sizeof(ctrl));
-    ctrl.id = V4L2_CID_TI_DISPC_OVERLAY;
-    ctrl.value = -1;
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_G_CTRL, &ctrl, "get path");
-    if (ret < 0) {
-        error(fd, "VIDIOC_G_CTRL id: V4L2_CID_TI_DISPC_OVERLAY ioctl");
-        return ret;
-        }
-    *id = ctrl.value;
-     return ret;
-}
-
-enum v4l2_s3d_mode get_s3d_mode(uint32_t mode)
-{
-    switch(mode) {
-        default:
-        case OVERLAY_S3D_MODE_OFF:
-            return V4L2_S3D_MODE_OFF;
-        case OVERLAY_S3D_MODE_ON:
-            return V4L2_S3D_MODE_ON;
-        case OVERLAY_S3D_MODE_ANAGLYPH:
-            return V4L2_S3D_MODE_ANAGLYPH;
-    }
-}
-
-uint32_t set_s3d_mode(enum v4l2_s3d_mode mode)
-{
-    switch(mode) {
-        default:
-        case V4L2_S3D_MODE_OFF:
-            return OVERLAY_S3D_MODE_OFF;
-        case V4L2_S3D_MODE_ON:
-            return OVERLAY_S3D_MODE_ON;
-        case V4L2_S3D_MODE_ANAGLYPH:
-            return OVERLAY_S3D_MODE_ANAGLYPH;
-    }
-}
-
-int v4l2_overlay_set_s3d_mode(int fd, uint32_t mode)
-{
-    LOG_FUNCTION_NAME
-    int ret;
-    struct v4l2_control ctrl;
-    memset(&ctrl, 0, sizeof(ctrl));
-    ctrl.id = V4L2_CID_PRIVATE_S3D_MODE;
-    ctrl.value = get_s3d_mode(mode);
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_S_CTRL, &ctrl, "set s3d mode");
-    return ret;
-}
-
-int v4l2_overlay_get_s3d_mode(int fd, uint32_t *mode)
-{
-    LOG_FUNCTION_NAME
-    int ret;
-    struct v4l2_control ctrl;
-    memset(&ctrl, 0, sizeof(ctrl));
-    ctrl.id = V4L2_CID_PRIVATE_S3D_MODE;
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_G_CTRL, &ctrl, "get s3d mode");
-    *mode = set_s3d_mode(ctrl.value);
-
-    return ret;
-}
-
-int v4l2_overlay_set_display_id(int fd, uint32_t id)
-{
-    LOG_FUNCTION_NAME
-    int ret;
-    struct v4l2_control ctrl;
-    memset(&ctrl, 0, sizeof(ctrl));
-    ctrl.id = V4L2_CID_PRIVATE_DISPLAY_ID;
-    ctrl.value = id;
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_S_CTRL, &ctrl, "set display ID");
-
-    return ret;
-}
-
-int v4l2_overlay_get_display_id(int fd, uint32_t *id)
-{
-    LOG_FUNCTION_NAME
-    int ret;
-    struct v4l2_control ctrl;
-    memset(&ctrl, 0, sizeof(ctrl));
-    ctrl.value = -1;
-    ctrl.id = V4L2_CID_PRIVATE_DISPLAY_ID;
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_G_CTRL, &ctrl, "get display ID");
-    *id = ctrl.value;
-
-    return ret;
-}
-
-int v4l2_overlay_set_anaglyph_type(int fd, uint32_t id)
-{
-    LOG_FUNCTION_NAME
-    int ret;
-    struct v4l2_control ctrl;
-    memset(&ctrl, 0, sizeof(ctrl));
-    ctrl.id = V4L2_CID_PRIVATE_ANAGLYPH_TYPE;
-    ctrl.value = id;
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_S_CTRL, &ctrl, "set anaglpyh type");
-
-    return ret;
-}
-
-void configure_s3d_format(struct v4l2_frame_packing *frame_packing,
-                        uint32_t fmt, uint32_t order, uint32_t subsampling)
-{
-    enum v4l2_frame_pack_type type;
-    enum v4l2_frame_pack_order v4l2_order;
-    enum v4l2_frame_pack_sub_sample v4l2_subsampling;
-
-    switch(fmt) {
-        default:
-        case OVERLAY_S3D_FORMAT_NONE:
-            type = V4L2_FPACK_NONE;
-            break;
-        case OVERLAY_S3D_FORMAT_OVERUNDER:
-            type = V4L2_FPACK_OVERUNDER;
-            break;
-        case OVERLAY_S3D_FORMAT_SIDEBYSIDE:
-            type = V4L2_FPACK_SIDEBYSIDE;
-            break;
-        case OVERLAY_S3D_FORMAT_ROW_IL:
-            type = V4L2_FPACK_ROW_IL;
-            break;
-        case OVERLAY_S3D_FORMAT_COL_IL:
-            type = V4L2_FPACK_COL_IL;
-            break;
-        case OVERLAY_S3D_FORMAT_PIX_IL:
-            type = V4L2_FPACK_PIX_IL;
-            break;
-        case OVERLAY_S3D_FORMAT_CHECKB:
-            type = V4L2_FPACK_CHECKB;
-            break;
-        case OVERLAY_S3D_FORMAT_FRM_SEQ:
-            type = V4L2_FPACK_FRM_SEQ;
-            break;
-    }
-
-    switch(order) {
-        default:
-        case OVERLAY_S3D_ORDER_LF:
-            v4l2_order = V4L2_FPACK_ORDER_LF;
-            break;
-        case OVERLAY_S3D_ORDER_RF:
-            v4l2_order = V4L2_FPACK_ORDER_RF;
-            break;
-    }
-
-    switch(subsampling) {
-        default:
-        case OVERLAY_S3D_SS_NONE:
-            v4l2_subsampling = V4L2_FPACK_SS_NONE;
-            break;
-        case OVERLAY_S3D_SS_HOR:
-            v4l2_subsampling = V4L2_FPACK_SS_HOR;
-            break;
-        case OVERLAY_S3D_SS_VERT:
-            v4l2_subsampling = V4L2_FPACK_SS_VERT;
-            break;
-    }
-
-    frame_packing->type = type;
-    frame_packing->order = v4l2_order;
-    frame_packing->sub_samp = v4l2_subsampling;
-}
-
-int v4l2_overlay_set_s3d_format(int fd, uint32_t fmt, uint32_t order, uint32_t subsampling)
-{
-    LOG_FUNCTION_NAME
-    int ret;
-    struct v4l2_format format;
-
-    format.type = V4L2_BUF_TYPE_PRIVATE;
-    configure_s3d_format((struct v4l2_frame_packing *)format.fmt.raw_data, fmt, order, subsampling);
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_S_FMT, &format, "set s3d format");
-
-    return ret;
-
-}
-
-int v4l2_overlay_get_s3d_format(int fd, uint32_t *fmt, uint32_t *order, uint32_t *subsampling)
-{
-
-    LOG_FUNCTION_NAME
-    int ret;
-    struct v4l2_format format;
-
-    format.type = V4L2_BUF_TYPE_PRIVATE;
-    ret = v4l2_overlay_ioctl(fd, VIDIOC_G_FMT, &format, "get s3d format");
-    *fmt = ((struct v4l2_frame_packing *)format.fmt.raw_data)->type;
-    *order =((struct v4l2_frame_packing *)format.fmt.raw_data)->order;
-    *subsampling = ((struct v4l2_frame_packing *)format.fmt.raw_data)->sub_samp;
-
-    return ret;
-}
-
-
-/*
-Copies 2D buffer to 1D buffer. All heights, widths etc. should be in bytes.
-The function copies the lower no. of bytes i.e. if nSize1D < (nHeight2D * nWidth2D)
-then nSize1D bytes is copied else (nHeight2D * nWidth2D) bytes is copied.
-This function does not return any leftover no. of bytes, the calling function
-needs to take care of leftover bytes on its own
-*/
-static int32_t framenumber = 0;
-int32_t Util_Memcpy_2Dto1D(void* pSrc2D, uint32_t nHeight2D, uint32_t nWidth2D, uint32_t nStride2D)
-{
-   FILE *pOutFile;
-   int32_t eError = 0;
-   uint8_t *pInBuffer;
-   uint32_t i;
-
-   char framenumberstr[100];
-   sprintf(framenumberstr, "/patterns/output/frame_%d.txt", framenumber);
-   LOGE("file path %s",framenumberstr);
-   pOutFile = fopen(framenumberstr, "wb");
-   if(pOutFile == NULL)
-   {
-    LOGE("\n!!!!!!!!!!!!!!!!Error in file open\n");
-    return eError;
-   }
-   LOGE("File Opened");
-   pInBuffer = (uint8_t *)pSrc2D;
-   LOGE("2Dto1D 0x%x WxH [%d]x[%d]",(int)pInBuffer,nWidth2D,nHeight2D);
-
-    for(i = 0; i < nHeight2D; i++)
-    {
-    //LOGE("WR%i 0x%x",i,pInBuffer);
-    fwrite(pInBuffer, 1, nWidth2D, pOutFile);
-    fflush(pOutFile);
-        pInBuffer = (uint8_t *)((uint32_t)pInBuffer + nStride2D);
-    }
-   fclose(pOutFile);
-   framenumber++;
-   LOGE("Frame dump done");
-   return eError;
-}
-

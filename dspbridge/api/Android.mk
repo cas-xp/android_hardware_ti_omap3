@@ -13,6 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-ifeq ($(TARGET_BOARD_PLATFORM),omap3)
-  include $(all-subdir-makefiles)
-endif
+
+include $(all-subdir-makefiles)
